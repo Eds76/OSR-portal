@@ -160,10 +160,13 @@ export default function Vtt() {
       setRole(selectedRole);
       setRoomId(finalRoomId);
       
-      // Создаем инстанс Peer
-      // Для упрощения используем бесплатный глобальный облачный сигнальный сервер PeerJS
+      // Создаем инстанс Peer с явным указанием защищенного хоста и портов
       const peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
-        debug: 1
+        host: '0.peerjs.com',
+        port: 443,
+        path: '/',
+        secure: true,
+        debug: 3
       });
 
       peerRef.current = peer;
@@ -185,7 +188,22 @@ export default function Vtt() {
 
       peer.on('error', (err) => {
         console.error('Ошибка WebRTC:', err);
-        alert(`Сетевая ошибка: ${err.message}. Попробуем запустить локальную сессию.`);
+        
+        if (err.type === 'peer-unavailable') {
+          alert('Ошибка: комната с таким ID не найдена. Убедитесь, что Ведущий создал комнату и вы правильно скопировали ID.');
+          setRole(null);
+          setConnected(false);
+          return;
+        }
+        
+        if (err.type === 'unavailable-id') {
+          alert('Ошибка: этот ID комнаты временно занят на сервере. Пожалуйста, подождите 15 секунд или попробуйте с другим именем комнаты.');
+          setRole(null);
+          setConnected(false);
+          return;
+        }
+
+        alert(`Сетевая ошибка (${err.type || 'unknown'}): ${err.message}. Попробуем запустить локальную сессию.`);
         startLocalSession(selectedRole);
       });
 
