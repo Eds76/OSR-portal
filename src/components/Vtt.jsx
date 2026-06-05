@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Shield, Users, User, Flame, Clock, Play, RotateCcw, 
   Trash2, Plus, Minus, Move, Eye, EyeOff, Brush, Info,
-  Volume2, Link, Copy, Check, Radio, Skull
+  Volume2, Link, Copy, Check, Radio, Skull, Magnet
 } from 'lucide-react';
 
 // Размер одной ячейки сетки на карте
@@ -218,6 +218,7 @@ export default function Vtt() {
   const containerRef = useRef(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 550 });
   const [activeTool, setActiveTool] = useState('move'); // 'move', 'pencil', 'eraser', 'fog_on', 'fog_off'
+  const [snapToGrid, setSnapToGrid] = useState(false); // Привязка к сетке (рисование по нодам)
   const [brushColor, setBrushColor] = useState('#c5a059');
   const [brushWidth, setBrushWidth] = useState(4);
   const [zoom, setZoom] = useState(1);
@@ -228,6 +229,7 @@ export default function Vtt() {
   const lastMousePosRef = useRef({ x: 0, y: 0 });
   const activeLinePointsRef = useRef([]);
   const activeTokenIdRef = useRef(null);
+  const activeLineIdRef = useRef(null); // Реф для ID текущей рисуемой линии
   const isDraggingMapRef = useRef(false);
 
   // Список доступных цветов для рисования
@@ -255,6 +257,21 @@ export default function Vtt() {
     });
     resizeObserver.observe(containerRef.current);
     return () => resizeObserver.disconnect();
+  }, []);
+
+  // Очистка WebRTC сессии при размонтировании
+  useEffect(() => {
+    return () => {
+      if (roomRef.current) {
+        console.log('[Trystero] Покидаем комнату при размонтировании компонента');
+        try {
+          roomRef.current.leave();
+        } catch (err) {
+          console.warn('Ошибка при выходе из комнаты Trystero:', err);
+        }
+        roomRef.current = null;
+      }
+    };
   }, []);
 
   // --- Запуск Trystero сессии (WebRTC без серверов) ---
@@ -355,6 +372,13 @@ export default function Vtt() {
     if (action === 'DRAW_LINE') {
       setDrawLines(prev => {
         const next = [...prev, payload];
+        syncState({ drawLines: next });
+        return next;
+      });
+    }
+    if (action === 'UPDATE_LINE') {
+      setDrawLines(prev => {
+        const next = prev.map(l => l.id === payload.id ? { ...l, points: payload.points } : l);
         syncState({ drawLines: next });
         return next;
       });
@@ -504,7 +528,7 @@ export default function Vtt() {
       ctx.fillText('Зажгите факел, чтобы видеть окружение', (MAP_COLS * GRID_SIZE) / 2, (MAP_ROWS * GRID_SIZE) / 2 + 30);
     }
 
-    // 4. Отрисовка токенов (персонажей и монстров)
+    // 4. Отрисовка токенов (персонажей, монстров и объектов)
     tokens.forEach((token) => {
       // Игрок не должен видеть токен, если он находится в тумане войны
       const tokenCol = Math.floor(token.x / GRID_SIZE);
@@ -512,6 +536,20 @@ export default function Vtt() {
       const inFog = fogMatrix[`${tokenCol},${tokenRow}`];
       
       if (inFog && role === 'player') return;
+
+      // Если это условный объект (дверь, лестница, сундук и т.д.)
+      if (token.type === 'object') {
+        ctx.font = '22px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(token.emoji || '📦', token.x, token.y);
+
+        // Маленькая подпись под объектом
+        ctx.fillStyle = 'rgba(230, 225, 218, 0.75)';
+        ctx.font = '9px Crimson Text';
+        ctx.fillText(token.name, token.x, token.y + GRID_SIZE / 2 + 6);
+        return; // Пропускаем стандартную отрисовку кружка токена
+      }
 
       // Рисуем кружок токена
       ctx.beginPath();
@@ -565,8 +603,14 @@ export default function Vtt() {
     const screenY = clientY - rect.top;
 
     // Обратное преобразование с учетом сдвига и масштаба
-    const canvasX = (screenX - panOffset.x) / zoom;
-    const canvasY = (screenY - panOffset.y) / zoom;
+    let canvasX = (screenX - panOffset.x) / zoom;
+    let canvasY = (screenY - panOffset.y) / zoom;
+
+    // Привязка к углам сетки (нодам) при рисовании
+    if (snapToGrid && (activeTool === 'pencil' || activeTool === 'eraser')) {
+      canvasX = Math.round(canvasX / GRID_SIZE) * GRID_SIZE;
+      canvasY = Math.round(canvasY / GRID_SIZE) * GRID_SIZE;
+    }
 
     return { x: canvasX, y: canvasY };
   };
@@ -583,8 +627,11 @@ export default function Vtt() {
     }
 
     if (activeTool === 'pencil' || activeTool === 'eraser') {
+      const lineId = `line-${Date.now()}-${Math.random()}`;
+      activeLineIdRef.current = lineId;
       activeLinePointsRef.current = [coords];
       const newLine = {
+        id: lineId,
         tool: activeTool,
         color: brushColor,
         width: brushWidth,
@@ -648,15 +695,23 @@ export default function Vtt() {
     }
 
     if (activeTool === 'pencil' || activeTool === 'eraser') {
-      activeLinePointsRef.current.push(coords);
-      setDrawLines(prev => {
-        if (prev.length === 0) return prev;
-        const lastLine = prev[prev.length - 1];
-        const updatedLine = { ...lastLine, points: [...activeLinePointsRef.current] };
-        const next = [...prev.slice(0, -1), updatedLine];
-        syncState({ drawLines: next });
-        return next;
-      });
+      const lastPoint = activeLinePointsRef.current[activeLinePointsRef.current.length - 1];
+      // Избегаем дублирования точек при рисовании по нодам сетки
+      if (!lastPoint || lastPoint.x !== coords.x || lastPoint.y !== coords.y) {
+        activeLinePointsRef.current.push(coords);
+        setDrawLines(prev => {
+          if (prev.length === 0) return prev;
+          const lastLine = prev[prev.length - 1];
+          const updatedLine = { ...lastLine, points: [...activeLinePointsRef.current] };
+          const next = [...prev.slice(0, -1), updatedLine];
+          syncState({ drawLines: next });
+          return next;
+        });
+
+        if (role !== 'dm') {
+          sendPlayerAction('UPDATE_LINE', { id: activeLineIdRef.current, points: [...activeLinePointsRef.current] });
+        }
+      }
       lastMousePosRef.current = coords;
       return;
     }
@@ -876,7 +931,7 @@ export default function Vtt() {
   const addToken = (isMonster) => {
     if (role !== 'dm') return;
     const tokenName = isMonster 
-      ? `Монстр ${tokens.filter(t => t.isMonster).length + 1}`
+      ? `Монстр ${tokens.filter(t => t.isMonster && t.type !== 'object').length + 1}`
       : prompt('Введите имя персонажа:') || 'Герой';
 
     const newToken = {
@@ -896,6 +951,25 @@ export default function Vtt() {
     addLogMessage('Система', `На поле добавлен токен: ${tokenName}`);
   };
 
+  // Добавить условный объект (дверь, лестница и т.д.)
+  const addObjectToken = (objName, emoji) => {
+    if (role !== 'dm') return;
+    const newToken = {
+      id: `token-${Date.now()}-${Math.random()}`,
+      name: objName,
+      x: GRID_SIZE * 3 + GRID_SIZE / 2,
+      y: GRID_SIZE * 3 + GRID_SIZE / 2,
+      type: 'object',
+      emoji: emoji
+    };
+    setTokens(prev => {
+      const next = [...prev, newToken];
+      syncState({ tokens: next });
+      return next;
+    });
+    addLogMessage('Система', `На поле добавлен объект: ${objName} ${emoji}`);
+  };
+
   // Удалить последний токен
   const removeLastToken = () => {
     if (role !== 'dm') return;
@@ -907,7 +981,7 @@ export default function Vtt() {
       syncState({ tokens: next });
       return next;
     });
-    addLogMessage('Система', `С поля удален токен: ${last.name}`);
+    addLogMessage('Система', `С поля удален объект/токен: ${last.name}`);
   };
 
   return (
@@ -1016,6 +1090,20 @@ export default function Vtt() {
               <Trash2 size={20} style={{ color: activeTool === 'eraser' ? '#fff' : 'var(--gold-accent)' }} />
             </button>
 
+            {/* Кнопка привязки к сетке (магнит) */}
+            <button 
+              title={snapToGrid ? "Привязка к сетке: ВКЛ" : "Привязка к сетке: ВЫКЛ"}
+              className="osr-button" 
+              style={{ 
+                padding: '0.5rem', 
+                background: snapToGrid ? 'var(--gold-dark)' : 'transparent', 
+                border: snapToGrid ? '1px solid var(--gold-bright)' : 'none' 
+              }}
+              onClick={() => setSnapToGrid(prev => !prev)}
+            >
+              <Magnet size={20} style={{ color: snapToGrid ? '#fff' : 'var(--gold-accent)' }} />
+            </button>
+
             {/* Инструменты тумана войны для DM */}
             {role === 'dm' && (
               <>
@@ -1083,8 +1171,26 @@ export default function Vtt() {
                 >
                   <Skull size={20} style={{ color: '#ff9999' }} />
                 </button>
+                
+                {/* Объекты для DM */}
+                <div style={{ width: '100%', height: '1px', background: 'var(--border-gold)', margin: '0.3rem 0' }}></div>
+                <div style={{ fontSize: '0.55rem', color: 'var(--text-muted)', fontWeight: 'bold', textTransform: 'uppercase', textAlign: 'center' }}>Объекты</div>
+                <button title="Добавить дверь" className="osr-button" style={{ padding: '0.5rem' }} onClick={() => addObjectToken('Дверь', '🚪')}>
+                  🚪
+                </button>
+                <button title="Добавить лестницу" className="osr-button" style={{ padding: '0.5rem' }} onClick={() => addObjectToken('Лестница', '🪜')}>
+                  🪜
+                </button>
+                <button title="Добавить сундук" className="osr-button" style={{ padding: '0.5rem' }} onClick={() => addObjectToken('Сундук', '🪙')}>
+                  🪙
+                </button>
+                <button title="Добавить ловушку" className="osr-button" style={{ padding: '0.5rem' }} onClick={() => addObjectToken('Ловушка', '⚠️')}>
+                  ⚠️
+                </button>
+
+                <div style={{ width: '100%', height: '1px', background: 'var(--border-gold)', margin: '0.3rem 0' }}></div>
                 <button 
-                  title="Убрать последний токен"
+                  title="Убрать последний объект/токен"
                   className="osr-button danger" 
                   style={{ padding: '0.5rem' }}
                   onClick={removeLastToken}
