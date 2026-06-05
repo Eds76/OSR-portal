@@ -100,13 +100,101 @@ export default function Vtt() {
   const sendActionRef = useRef(null);
   const sendIdentityRef = useRef(null);
 
+  // Рефы для обхода проблемы stale closures (устаревших замыканий)
+  const playersListRef = useRef(playersList);
+  const onPeerJoinRef = useRef(null);
+  const onPeerLeaveRef = useRef(null);
+  const onIdentityMessageRef = useRef(null);
+  const onActionMessageRef = useRef(null);
+
+  // Синхронизируем рефы с актуальными значениями на каждом рендере
+  useEffect(() => {
+    playersListRef.current = playersList;
+  }, [playersList]);
+
+  // Актуальные обработчики событий, которые всегда видят свежий стейт
+  onPeerJoinRef.current = (joiningPeerId) => {
+    console.log('[Trystero] Подключился пир:', joiningPeerId);
+    
+    // Собственная идентичность на основе текущего состояния
+    const myIdentity = { id: peerId, name: role === 'dm' ? `${name} (DM)` : name, role };
+    if (sendIdentityRef.current) {
+      sendIdentityRef.current(myIdentity, joiningPeerId);
+    }
+
+    if (role === 'dm' && sendActionRef.current) {
+      sendActionRef.current({
+        type: 'INIT_STATE',
+        payload: {
+          drawLines,
+          tokens,
+          fogMatrix,
+          dungeonClock,
+          rollLog
+        }
+      }, joiningPeerId);
+    }
+  };
+
+  onPeerLeaveRef.current = (leavingPeerId) => {
+    console.log('[Trystero] Отключился пир:', leavingPeerId);
+    setPlayersList(prev => {
+      const item = prev.find(p => p.id === leavingPeerId);
+      const nameStr = item ? item.name : 'Неизвестный';
+      addLogMessage('Система', `Игрок [${nameStr}] покинул чертог.`);
+      return prev.filter(p => p.id !== leavingPeerId);
+    });
+  };
+
+  onIdentityMessageRef.current = (data, senderPeerId) => {
+    setPlayersList(prev => {
+      const exists = prev.some(p => p.id === senderPeerId);
+      let newList;
+      if (exists) {
+        newList = prev.map(p => p.id === senderPeerId ? { ...p, ...data, id: senderPeerId } : p);
+      } else {
+        newList = [...prev, { ...data, id: senderPeerId }];
+        addLogMessage('Система', `Игрок [${data.name}] вошел в чертог.`);
+      }
+      return newList;
+    });
+  };
+
+  onActionMessageRef.current = (data, senderPeerId) => {
+    if (role === 'dm') {
+      if (data.type === 'PLAYER_ACTION') {
+        handlePlayerAction(data.action, data.payload, senderPeerId);
+      }
+    } else {
+      if (data.type === 'INIT_STATE') {
+        setDrawLines(data.payload.drawLines);
+        setTokens(data.payload.tokens);
+        setFogMatrix(data.payload.fogMatrix);
+        setDungeonClock(data.payload.dungeonClock);
+        setRollLog(data.payload.rollLog);
+      }
+
+      if (data.type === 'STATE_SYNC') {
+        if (data.payload.drawLines) setDrawLines(data.payload.drawLines);
+        if (data.payload.tokens) setTokens(data.payload.tokens);
+        if (data.payload.fogMatrix) setFogMatrix(data.payload.fogMatrix);
+        if (data.payload.dungeonClock) setDungeonClock(data.payload.dungeonClock);
+        if (data.payload.rollLog) setRollLog(data.payload.rollLog);
+      }
+
+      if (data.type === 'DICE_SOUND') playSound('dice');
+      if (data.type === 'ALERT_SOUND') playSound('alert');
+      if (data.type === 'TORCH_SOUND') playSound('torch_on');
+    }
+  };
+
   const sendPlayerAction = (action, payload) => {
     const msg = {
       type: 'PLAYER_ACTION',
       action,
       payload
     };
-    const dm = playersList.find(p => p.role === 'dm');
+    const dm = playersListRef.current.find(p => p.role === 'dm');
     if (dm && sendActionRef.current) {
       sendActionRef.current(msg, dm.id);
     }
@@ -177,12 +265,12 @@ export default function Vtt() {
       roomRef.current = room;
       setConnected(true);
 
-      // Регистрируем действия (makeAction в Trystero возвращает объект действия)
-      const actionChannel = room.makeAction('action');
-      const identityChannel = room.makeAction('identity');
+      // Регистрируем действия (makeAction в Trystero возвращает [send, get])
+      const [sendAction, getAction] = room.makeAction('action');
+      const [sendIdentity, getIdentity] = room.makeAction('identity');
       
-      sendActionRef.current = (data, targetId) => actionChannel.send(data, targetId ? { target: targetId } : undefined);
-      sendIdentityRef.current = (data, targetId) => identityChannel.send(data, targetId ? { target: targetId } : undefined);
+      sendActionRef.current = (data, targetId) => sendAction(data, targetId);
+      sendIdentityRef.current = (data, targetId) => sendIdentity(data, targetId);
 
       // Локальный список игроков (мы сами)
       const myIdentity = { id: selfId, name: selectedRole === 'dm' ? `${name} (DM)` : name, role: selectedRole };
@@ -196,79 +284,31 @@ export default function Vtt() {
 
       // Событие подключения нового пира
       room.onPeerJoin = peerId => {
-        console.log('[Trystero] Подключился пир:', peerId);
-        // Отправляем свою идентичность новому пиру
-        sendIdentityRef.current(myIdentity, peerId);
-
-        if (selectedRole === 'dm') {
-          // Отправляем новому игроку начальное состояние
-          sendActionRef.current({
-            type: 'INIT_STATE',
-            payload: {
-              drawLines,
-              tokens,
-              fogMatrix,
-              dungeonClock,
-              rollLog
-            }
-          }, peerId);
+        if (onPeerJoinRef.current) {
+          onPeerJoinRef.current(peerId);
         }
       };
 
       // Событие отключения пира
       room.onPeerLeave = peerId => {
-        console.log('[Trystero] Отключился пир:', peerId);
-        setPlayersList(prev => {
-          const item = prev.find(p => p.id === peerId);
-          const nameStr = item ? item.name : 'Неизвестный';
-          addLogMessage('Система', `Игрок [${nameStr}] покинул чертог.`);
-          return prev.filter(p => p.id !== peerId);
-        });
+        if (onPeerLeaveRef.current) {
+          onPeerLeaveRef.current(peerId);
+        }
       };
 
       // Прием идентичности игроков
-      identityChannel.onMessage = (data, { peerId }) => {
-        setPlayersList(prev => {
-          const exists = prev.some(p => p.id === peerId);
-          let newList;
-          if (exists) {
-            newList = prev.map(p => p.id === peerId ? { ...p, ...data, id: peerId } : p);
-          } else {
-            newList = [...prev, { ...data, id: peerId }];
-            addLogMessage('Система', `Игрок [${data.name}] вошел в чертог.`);
-          }
-          return newList;
-        });
-      };
+      getIdentity((data, senderPeerId) => {
+        if (onIdentityMessageRef.current) {
+          onIdentityMessageRef.current(data, senderPeerId);
+        }
+      });
 
       // Прием сетевых событий
-      actionChannel.onMessage = (data, { peerId }) => {
-        if (selectedRole === 'dm') {
-          if (data.type === 'PLAYER_ACTION') {
-            handlePlayerAction(data.action, data.payload, peerId);
-          }
-        } else {
-          if (data.type === 'INIT_STATE') {
-            setDrawLines(data.payload.drawLines);
-            setTokens(data.payload.tokens);
-            setFogMatrix(data.payload.fogMatrix);
-            setDungeonClock(data.payload.dungeonClock);
-            setRollLog(data.payload.rollLog);
-          }
-
-          if (data.type === 'STATE_SYNC') {
-            if (data.payload.drawLines) setDrawLines(data.payload.drawLines);
-            if (data.payload.tokens) setTokens(data.payload.tokens);
-            if (data.payload.fogMatrix) setFogMatrix(data.payload.fogMatrix);
-            if (data.payload.dungeonClock) setDungeonClock(data.payload.dungeonClock);
-            if (data.payload.rollLog) setRollLog(data.payload.rollLog);
-          }
-
-          if (data.type === 'DICE_SOUND') playSound('dice');
-          if (data.type === 'ALERT_SOUND') playSound('alert');
-          if (data.type === 'TORCH_SOUND') playSound('torch_on');
+      getAction((data, senderPeerId) => {
+        if (onActionMessageRef.current) {
+          onActionMessageRef.current(data, senderPeerId);
         }
-      };
+      });
 
     } catch (e) {
       console.error('Не удалось инициализировать Trystero:', e);
@@ -295,7 +335,7 @@ export default function Vtt() {
 
   // Обработка действий игрока на сервере DM
   const handlePlayerAction = (action, payload, senderPeer) => {
-    const sender = playersList.find(p => p.id === senderPeer)?.name || 'Игрок';
+    const sender = playersListRef.current.find(p => p.id === senderPeer)?.name || 'Игрок';
 
     if (action === 'DRAW_LINE') {
       setDrawLines(prev => {
