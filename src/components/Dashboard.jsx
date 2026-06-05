@@ -34,7 +34,7 @@ export default function Dashboard() {
       <div className="osr-card" style={{ padding: '0', marginBottom: '3rem', border: '1px solid var(--gold-dark)', display: 'flex', flexDirection: 'column' }}>
         <div style={{ position: 'relative', height: '320px', overflow: 'hidden', backgroundColor: '#000' }}>
           <img 
-            src="/osr_hero_banner.png" 
+            src={`${import.meta.env.BASE_URL}osr_hero_banner.png`} 
             alt="OSR Dungeon Art" 
             style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: '0.6', mixBlendMode: 'luminosity' }}
           />
