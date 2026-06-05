@@ -195,7 +195,7 @@ export default function Vtt() {
       }
 
       // Событие подключения нового пира
-      room.onPeerJoin(peerId => {
+      room.onPeerJoin = peerId => {
         console.log('[Trystero] Подключился пир:', peerId);
         // Отправляем свою идентичность новому пиру
         sendIdentityRef.current(myIdentity, peerId);
@@ -213,10 +213,10 @@ export default function Vtt() {
             }
           }, peerId);
         }
-      });
+      };
 
       // Событие отключения пира
-      room.onPeerLeave(peerId => {
+      room.onPeerLeave = peerId => {
         console.log('[Trystero] Отключился пир:', peerId);
         setPlayersList(prev => {
           const item = prev.find(p => p.id === peerId);
@@ -224,7 +224,7 @@ export default function Vtt() {
           addLogMessage('Система', `Игрок [${nameStr}] покинул чертог.`);
           return prev.filter(p => p.id !== peerId);
         });
-      });
+      };
 
       // Прием идентичности игроков
       identityChannel.onMessage = (data, { peerId }) => {
