@@ -92,8 +92,11 @@ export default function Vtt() {
   const [roomId, setRoomId] = useState('');
   const [peerId, setPeerId] = useState('');
   const [connected, setConnected] = useState(false);
-  const [playersList, setPlayersList] = useState([]);
   const [copiedId, setCopiedId] = useState(false);
+  const [useLocalServer, setUseLocalServer] = useState(() => {
+    // По умолчанию используем локальный сигнальный сервер, если мы не на github.io
+    return !window.location.hostname.includes('github.io');
+  });
 
   // --- Сетевой слой (PeerJS) ---
   const peerRef = useRef(null);
@@ -160,14 +163,29 @@ export default function Vtt() {
       setRole(selectedRole);
       setRoomId(finalRoomId);
       
-      // Создаем инстанс Peer с явным указанием защищенного хоста и портов
-      const peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
-        host: '0.peerjs.com',
-        port: 443,
-        path: '/',
-        secure: true,
-        debug: 3
-      });
+      // Создаем инстанс Peer с выбором локального или глобального сервера
+      let peer;
+      if (useLocalServer) {
+        const isHttps = window.location.protocol === 'https:';
+        const hostPort = window.location.port ? parseInt(window.location.port) : (isHttps ? 443 : 80);
+        peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
+          host: window.location.hostname,
+          port: hostPort,
+          path: '/peerjs-local',
+          secure: isHttps,
+          debug: 3
+        });
+        console.log(`[PeerJS] Подключение к локальному сигнальному серверу: ${window.location.hostname}:${hostPort}/peerjs-local`);
+      } else {
+        peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
+          host: '0.peerjs.com',
+          port: 443,
+          path: '/',
+          secure: true,
+          debug: 3
+        });
+        console.log(`[PeerJS] Подключение к глобальному сигнальному серверу 0.peerjs.com`);
+      }
 
       peerRef.current = peer;
 
@@ -942,6 +960,19 @@ export default function Vtt() {
                   value={roomId}
                   onChange={(e) => setRoomId(e.target.value)}
                 />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.2rem' }}>
+                <input 
+                  type="checkbox" 
+                  id="use-local-server"
+                  checked={useLocalServer}
+                  onChange={(e) => setUseLocalServer(e.target.checked)}
+                  style={{ accentColor: 'var(--gold-accent)', cursor: 'pointer' }}
+                />
+                <label htmlFor="use-local-server" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer', userSelect: 'none' }}>
+                  Локальный сигнальный сервер (обход блокировок RKN)
+                </label>
               </div>
             </div>
 
