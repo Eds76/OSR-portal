@@ -93,15 +93,23 @@ export default function Vtt() {
   const [peerId, setPeerId] = useState('');
   const [connected, setConnected] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
-  const [useLocalServer, setUseLocalServer] = useState(() => {
-    // По умолчанию используем локальный сигнальный сервер, если мы не на github.io
-    return !window.location.hostname.includes('github.io');
-  });
 
-  // --- Сетевой слой (PeerJS) ---
-  const peerRef = useRef(null);
-  const connMapRef = useRef(new Map()); // Для DM: хранит активные соединения
-  const connRef = useRef(null); // Для Игрока: соединение с DM
+  // --- Сетевой слой (Trystero) ---
+  const roomRef = useRef(null);
+  const sendActionRef = useRef(null);
+  const sendIdentityRef = useRef(null);
+
+  const sendPlayerAction = (action, payload) => {
+    const msg = {
+      type: 'PLAYER_ACTION',
+      action,
+      payload
+    };
+    const dm = playersList.find(p => p.role === 'dm');
+    if (dm && sendActionRef.current) {
+      sendActionRef.current(msg, dm.id);
+    }
+  };
 
   // --- Состояние игры (синхронизируется) ---
   const [drawLines, setDrawLines] = useState([]);
@@ -145,7 +153,7 @@ export default function Vtt() {
     setFogMatrix(initialFog);
   }, []);
 
-  // --- Динамический импорт и запуск PeerJS ---
+  // --- Запуск Trystero сессии (WebRTC без серверов) ---
   const startPeerSession = async (selectedRole, customRoomId) => {
     if (!name.trim()) {
       alert('Пожалуйста, введите свое имя искателя приключений.');
@@ -153,8 +161,7 @@ export default function Vtt() {
     }
 
     try {
-      // Загружаем PeerJS динамически, чтобы не падать, если он не установлен
-      const { default: Peer } = await import('peerjs');
+      const { joinRoom, selfId } = await import('trystero');
 
       const finalRoomId = selectedRole === 'dm' 
         ? (customRoomId || `osr-room-${Math.floor(1000 + Math.random() * 9000)}`)
@@ -162,77 +169,108 @@ export default function Vtt() {
 
       setRole(selectedRole);
       setRoomId(finalRoomId);
+      setPeerId(selfId);
+
+      // Подключаемся к комнате в Trystero (использует Nostr-протокол для сигналинга)
+      const room = joinRoom({ appId: 'osr-portal-vtt-v3' }, finalRoomId);
+      roomRef.current = room;
+      setConnected(true);
+
+      // Регистрируем действия
+      const [sendAction, recvAction] = room.makeAction('action');
+      const [sendIdentity, recvIdentity] = room.makeAction('identity');
       
-      // Создаем инстанс Peer с выбором локального или глобального сервера
-      let peer;
-      if (useLocalServer) {
-        const isHttps = window.location.protocol === 'https:';
-        const hostPort = window.location.port ? parseInt(window.location.port) : (isHttps ? 443 : 80);
-        peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
-          host: window.location.hostname,
-          port: hostPort,
-          path: '/peerjs-local',
-          secure: isHttps,
-          debug: 3
-        });
-        console.log(`[PeerJS] Подключение к локальному сигнальному серверу: ${window.location.hostname}:${hostPort}/peerjs-local`);
-      } else {
-        peer = new Peer(selectedRole === 'dm' ? finalRoomId : undefined, {
-          host: '0.peerjs.com',
-          port: 443,
-          path: '/',
-          secure: true,
-          debug: 3
-        });
-        console.log(`[PeerJS] Подключение к глобальному сигнальному серверу 0.peerjs.com`);
-      }
+      sendActionRef.current = sendAction;
+      sendIdentityRef.current = sendIdentity;
 
-      peerRef.current = peer;
-
-      peer.on('open', (id) => {
-        setPeerId(id);
-        setConnected(true);
-        if (selectedRole === 'dm') {
-          setPlayersList([{ id: 'dm', name: `${name} (DM)` }]);
-          addLogMessage('Система', `Создан чертог ведущего. ID комнаты: ${id}`);
-        } else {
-          addLogMessage('Система', `Подключение к комнате ${finalRoomId}...`);
-          // Подключаемся к DM
-          const conn = peer.connect(finalRoomId);
-          connRef.current = conn;
-          setupPlayerConnection(conn);
-        }
-      });
-
-      peer.on('error', (err) => {
-        console.error('Ошибка WebRTC:', err);
-        
-        if (err.type === 'peer-unavailable') {
-          alert('Ошибка: комната с таким ID не найдена. Убедитесь, что Ведущий создал комнату и вы правильно скопировали ID.');
-          setRole(null);
-          setConnected(false);
-          return;
-        }
-        
-        if (err.type === 'unavailable-id') {
-          alert('Ошибка: этот ID комнаты временно занят на сервере. Пожалуйста, подождите 15 секунд или попробуйте с другим именем комнаты.');
-          setRole(null);
-          setConnected(false);
-          return;
-        }
-
-        alert(`Сетевая ошибка (${err.type || 'unknown'}): ${err.message}. Попробуем запустить локальную сессию.`);
-        startLocalSession(selectedRole);
-      });
+      // Локальный список игроков (мы сами)
+      const myIdentity = { id: selfId, name: selectedRole === 'dm' ? `${name} (DM)` : name, role: selectedRole };
+      setPlayersList([myIdentity]);
 
       if (selectedRole === 'dm') {
-        peer.on('connection', (conn) => {
-          setupDmConnection(conn);
-        });
+        addLogMessage('Система', `Создан чертог ведущего. ID комнаты: ${finalRoomId}`);
+      } else {
+        addLogMessage('Система', `Подключение к комнате ${finalRoomId}...`);
       }
 
+      // Событие подключения нового пира
+      room.onPeerJoin(peerId => {
+        console.log('[Trystero] Подключился пир:', peerId);
+        // Отправляем свою идентичность новому пиру
+        sendIdentity(myIdentity, peerId);
+
+        if (selectedRole === 'dm') {
+          // Отправляем новому игроку начальное состояние
+          sendAction({
+            type: 'INIT_STATE',
+            payload: {
+              drawLines,
+              tokens,
+              fogMatrix,
+              dungeonClock,
+              rollLog
+            }
+          }, peerId);
+        }
+      });
+
+      // Событие отключения пира
+      room.onPeerLeave(peerId => {
+        console.log('[Trystero] Отключился пир:', peerId);
+        setPlayersList(prev => {
+          const item = prev.find(p => p.id === peerId);
+          const nameStr = item ? item.name : 'Неизвестный';
+          addLogMessage('Система', `Игрок [${nameStr}] покинул чертог.`);
+          return prev.filter(p => p.id !== peerId);
+        });
+      });
+
+      // Прием идентичности игроков
+      recvIdentity((data, peerId) => {
+        setPlayersList(prev => {
+          const exists = prev.some(p => p.id === peerId);
+          let newList;
+          if (exists) {
+            newList = prev.map(p => p.id === peerId ? { ...p, ...data, id: peerId } : p);
+          } else {
+            newList = [...prev, { ...data, id: peerId }];
+            addLogMessage('Система', `Игрок [${data.name}] вошел в чертог.`);
+          }
+          return newList;
+        });
+      });
+
+      // Прием сетевых событий
+      recvAction((data, peerId) => {
+        if (selectedRole === 'dm') {
+          if (data.type === 'PLAYER_ACTION') {
+            handlePlayerAction(data.action, data.payload, peerId);
+          }
+        } else {
+          if (data.type === 'INIT_STATE') {
+            setDrawLines(data.payload.drawLines);
+            setTokens(data.payload.tokens);
+            setFogMatrix(data.payload.fogMatrix);
+            setDungeonClock(data.payload.dungeonClock);
+            setRollLog(data.payload.rollLog);
+          }
+
+          if (data.type === 'STATE_SYNC') {
+            if (data.payload.drawLines) setDrawLines(data.payload.drawLines);
+            if (data.payload.tokens) setTokens(data.payload.tokens);
+            if (data.payload.fogMatrix) setFogMatrix(data.payload.fogMatrix);
+            if (data.payload.dungeonClock) setDungeonClock(data.payload.dungeonClock);
+            if (data.payload.rollLog) setRollLog(data.payload.rollLog);
+          }
+
+          if (data.type === 'DICE_SOUND') playSound('dice');
+          if (data.type === 'ALERT_SOUND') playSound('alert');
+          if (data.type === 'TORCH_SOUND') playSound('torch_on');
+        }
+      });
+
     } catch (e) {
-      console.error('Не удалось инициализировать PeerJS:', e);
+      console.error('Не удалось инициализировать Trystero:', e);
       alert('Ошибка WebRTC. Запускаем локальный оффлайн-режим.');
       startLocalSession(selectedRole);
     }
@@ -243,111 +281,15 @@ export default function Vtt() {
     setRole(selectedRole);
     setConnected(true);
     setRoomId('LOCAL_OFFLINE');
-    setPlayersList([{ id: 'local', name: `${name} (Локально)` }]);
+    setPlayersList([{ id: 'local', name: `${name} (Локально)`, role: selectedRole }]);
     addLogMessage('Система', 'Запущен локальный оффлайн-режим. Сетевая синхронизация отключена.');
-  };
-
-  // Логика подключения на стороне DM
-  const setupDmConnection = (conn) => {
-    conn.on('open', () => {
-      connMapRef.current.set(conn.peer, conn);
-      
-      // Отправляем игроку начальное состояние
-      conn.send({
-        type: 'INIT_STATE',
-        payload: {
-          drawLines,
-          tokens,
-          fogMatrix,
-          dungeonClock,
-          rollLog
-        }
-      });
-
-      // Запрашиваем имя игрока
-      conn.send({ type: 'REQ_NAME' });
-    });
-
-    conn.on('data', (data) => {
-      if (data.type === 'SEND_NAME') {
-        setPlayersList(prev => {
-          const newList = [...prev, { id: conn.peer, name: data.payload.name }];
-          broadcastToAll({ type: 'PLAYERS_UPDATE', payload: newList });
-          return newList;
-        });
-        addLogMessage('Система', `Игрок [${data.payload.name}] вошел в чертог.`);
-      }
-
-      if (data.type === 'PLAYER_ACTION') {
-        handlePlayerAction(data.action, data.payload, conn.peer);
-      }
-    });
-
-    conn.on('close', () => {
-      connMapRef.current.delete(conn.peer);
-      setPlayersList(prev => {
-        const item = prev.find(p => p.id === conn.peer);
-        const nameStr = item ? item.name : 'Неизвестный';
-        const newList = prev.filter(p => p.id !== conn.peer);
-        broadcastToAll({ type: 'PLAYERS_UPDATE', payload: newList });
-        addLogMessage('Система', `Игрок [${nameStr}] покинул чертог.`);
-        return newList;
-      });
-    });
-  };
-
-  // Логика подключения на стороне Игрока
-  const setupPlayerConnection = (conn) => {
-    conn.on('data', (data) => {
-      if (data.type === 'INIT_STATE') {
-        setDrawLines(data.payload.drawLines);
-        setTokens(data.payload.tokens);
-        setFogMatrix(data.payload.fogMatrix);
-        setDungeonClock(data.payload.dungeonClock);
-        setRollLog(data.payload.rollLog);
-      }
-
-      if (data.type === 'STATE_SYNC') {
-        if (data.payload.drawLines) setDrawLines(data.payload.drawLines);
-        if (data.payload.tokens) setTokens(data.payload.tokens);
-        if (data.payload.fogMatrix) setFogMatrix(data.payload.fogMatrix);
-        if (data.payload.dungeonClock) setDungeonClock(data.payload.dungeonClock);
-        if (data.payload.rollLog) setRollLog(data.payload.rollLog);
-      }
-
-      if (data.type === 'REQ_NAME') {
-        conn.send({ type: 'SEND_NAME', payload: { name } });
-      }
-
-      if (data.type === 'PLAYERS_UPDATE') {
-        setPlayersList(data.payload);
-      }
-
-      if (data.type === 'DICE_SOUND') {
-        playSound('dice');
-      }
-
-      if (data.type === 'ALERT_SOUND') {
-        playSound('alert');
-      }
-
-      if (data.type === 'TORCH_SOUND') {
-        playSound('torch_on');
-      }
-    });
-
-    conn.on('close', () => {
-      setConnected(false);
-      alert('Соединение с Ведущим потеряно.');
-      setRole(null);
-    });
   };
 
   // Рассылка изменений от DM ко всем игрокам
   const broadcastToAll = (msg) => {
-    connMapRef.current.forEach((conn) => {
-      if (conn.open) conn.send(msg);
-    });
+    if (roomRef.current && sendActionRef.current) {
+      sendActionRef.current(msg);
+    }
   };
 
   // Обработка действий игрока на сервере DM
@@ -601,11 +543,7 @@ export default function Vtt() {
         });
       } else {
         // Отправляем DM
-        connRef.current?.send({
-          type: 'PLAYER_ACTION',
-          action: 'DRAW_LINE',
-          payload: newLine
-        });
+        sendPlayerAction('DRAW_LINE', newLine);
         // Рисуем у себя локально
         setDrawLines(prev => [...prev, newLine]);
       }
@@ -674,11 +612,7 @@ export default function Vtt() {
         if (role === 'dm') {
           syncState({ tokens: next });
         } else {
-          connRef.current?.send({
-            type: 'PLAYER_ACTION',
-            action: 'MOVE_TOKEN',
-            payload: { id: activeTokenIdRef.current, x: coords.x, y: coords.y }
-          });
+          sendPlayerAction('MOVE_TOKEN', { id: activeTokenIdRef.current, x: coords.x, y: coords.y });
         }
         return next;
       });
@@ -716,11 +650,7 @@ export default function Vtt() {
           // Игрок отправляет привязанное состояние DM
           const updatedToken = next.find(t => t.id === activeTokenIdRef.current);
           if (updatedToken) {
-            connRef.current?.send({
-              type: 'PLAYER_ACTION',
-              action: 'MOVE_TOKEN',
-              payload: updatedToken
-            });
+            sendPlayerAction('MOVE_TOKEN', updatedToken);
           }
         }
         return next;
@@ -879,11 +809,7 @@ export default function Vtt() {
       });
     } else {
       // Игрок отправляет бросок Мастеру
-      connRef.current?.send({
-        type: 'PLAYER_ACTION',
-        action: 'DICE_ROLL',
-        payload: rollInfo
-      });
+      sendPlayerAction('DICE_ROLL', rollInfo);
       // Проигрываем звук локально
       playSound('dice');
       setRollLog(prev => [...prev, rollInfo]);
@@ -962,18 +888,7 @@ export default function Vtt() {
                 />
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.2rem' }}>
-                <input 
-                  type="checkbox" 
-                  id="use-local-server"
-                  checked={useLocalServer}
-                  onChange={(e) => setUseLocalServer(e.target.checked)}
-                  style={{ accentColor: 'var(--gold-accent)', cursor: 'pointer' }}
-                />
-                <label htmlFor="use-local-server" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer', userSelect: 'none' }}>
-                  Локальный сигнальный сервер (обход блокировок RKN)
-                </label>
-              </div>
+
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
