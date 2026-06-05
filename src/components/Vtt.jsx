@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Shield, Users, User, Flame, Clock, Play, RotateCcw, 
   Trash2, Plus, Minus, Move, Eye, EyeOff, Brush, Info,
-  Volume2, Link, Copy, Check, Radio
+  Volume2, Link, Copy, Check, Radio, Skull
 } from 'lucide-react';
 
 // Размер одной ячейки сетки на карте
@@ -215,6 +215,8 @@ export default function Vtt() {
 
   // --- Локальное состояние VTT холста ---
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const [dimensions, setDimensions] = useState({ width: 800, height: 550 });
   const [activeTool, setActiveTool] = useState('move'); // 'move', 'pencil', 'eraser', 'fog_on', 'fog_off'
   const [brushColor, setBrushColor] = useState('#c5a059');
   const [brushWidth, setBrushWidth] = useState(4);
@@ -240,6 +242,19 @@ export default function Vtt() {
       }
     }
     setFogMatrix(initialFog);
+  }, []);
+
+  // Отслеживание физического размера родительского контейнера холста
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        const { width, height } = entry.contentRect;
+        setDimensions({ width, height });
+      }
+    });
+    resizeObserver.observe(containerRef.current);
+    return () => resizeObserver.disconnect();
   }, []);
 
   // --- Запуск Trystero сессии (WebRTC без серверов) ---
@@ -534,7 +549,7 @@ export default function Vtt() {
     });
 
     ctx.restore();
-  }, [drawLines, tokens, fogMatrix, zoom, panOffset, role, dungeonClock.activeTorches]);
+  }, [drawLines, tokens, fogMatrix, zoom, panOffset, role, dungeonClock.activeTorches, dimensions]);
 
   // Вычисление координат мыши относительно холста с учетом сдвига и зума
   const getCanvasCoords = (e) => {
@@ -896,7 +911,14 @@ export default function Vtt() {
   };
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto', height: 'calc(100vh - 6rem)', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ 
+      margin: '-2.5rem', 
+      padding: '1.5rem', 
+      height: '100vh', 
+      display: 'flex', 
+      flexDirection: 'column', 
+      minHeight: 0 
+    }}>
       
       {/* 1. ЭКРАН ВХОДА / ПОДКЛЮЧЕНИЯ */}
       {!connected && (
@@ -1048,27 +1070,27 @@ export default function Vtt() {
                 <button 
                   title="Добавить героя"
                   className="osr-button" 
-                  style={{ padding: '0.4rem', borderColor: 'var(--gold-accent)' }}
+                  style={{ padding: '0.5rem', borderColor: 'var(--gold-accent)' }}
                   onClick={() => addToken(false)}
                 >
-                  <Plus size={16} /> Герой
+                  <User size={20} style={{ color: 'var(--gold-accent)' }} />
                 </button>
                 <button 
                   title="Добавить монстра"
                   className="osr-button danger" 
-                  style={{ padding: '0.4rem' }}
+                  style={{ padding: '0.5rem' }}
                   onClick={() => addToken(true)}
                 >
-                  <Plus size={16} /> Мнстр
+                  <Skull size={20} style={{ color: '#ff9999' }} />
                 </button>
                 <button 
                   title="Убрать последний токен"
                   className="osr-button danger" 
-                  style={{ padding: '0.4rem' }}
+                  style={{ padding: '0.5rem' }}
                   onClick={removeLastToken}
                   disabled={tokens.length === 0}
                 >
-                  <Minus size={16} />
+                  <Minus size={20} />
                 </button>
               </div>
             )}
@@ -1098,6 +1120,7 @@ export default function Vtt() {
 
             {/* Само поле карты */}
             <div 
+              ref={containerRef}
               style={{ 
                 flex: 1, 
                 position: 'relative', 
@@ -1111,8 +1134,8 @@ export default function Vtt() {
             >
               <canvas
                 ref={canvasRef}
-                width={800}
-                height={550}
+                width={dimensions.width}
+                height={dimensions.height}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
