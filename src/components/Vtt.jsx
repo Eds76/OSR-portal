@@ -93,6 +93,7 @@ export default function Vtt() {
   const [peerId, setPeerId] = useState('');
   const [connected, setConnected] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
+  const [playersList, setPlayersList] = useState([]);
 
   // --- Сетевой слой (Trystero) ---
   const roomRef = useRef(null);
@@ -176,12 +177,12 @@ export default function Vtt() {
       roomRef.current = room;
       setConnected(true);
 
-      // Регистрируем действия
-      const [sendAction, recvAction] = room.makeAction('action');
-      const [sendIdentity, recvIdentity] = room.makeAction('identity');
+      // Регистрируем действия (makeAction в Trystero возвращает объект действия)
+      const actionChannel = room.makeAction('action');
+      const identityChannel = room.makeAction('identity');
       
-      sendActionRef.current = sendAction;
-      sendIdentityRef.current = sendIdentity;
+      sendActionRef.current = (data, targetId) => actionChannel.send(data, targetId ? { target: targetId } : undefined);
+      sendIdentityRef.current = (data, targetId) => identityChannel.send(data, targetId ? { target: targetId } : undefined);
 
       // Локальный список игроков (мы сами)
       const myIdentity = { id: selfId, name: selectedRole === 'dm' ? `${name} (DM)` : name, role: selectedRole };
@@ -197,11 +198,11 @@ export default function Vtt() {
       room.onPeerJoin(peerId => {
         console.log('[Trystero] Подключился пир:', peerId);
         // Отправляем свою идентичность новому пиру
-        sendIdentity(myIdentity, peerId);
+        sendIdentityRef.current(myIdentity, peerId);
 
         if (selectedRole === 'dm') {
           // Отправляем новому игроку начальное состояние
-          sendAction({
+          sendActionRef.current({
             type: 'INIT_STATE',
             payload: {
               drawLines,
@@ -226,7 +227,7 @@ export default function Vtt() {
       });
 
       // Прием идентичности игроков
-      recvIdentity((data, peerId) => {
+      identityChannel.onMessage = (data, { peerId }) => {
         setPlayersList(prev => {
           const exists = prev.some(p => p.id === peerId);
           let newList;
@@ -238,10 +239,10 @@ export default function Vtt() {
           }
           return newList;
         });
-      });
+      };
 
       // Прием сетевых событий
-      recvAction((data, peerId) => {
+      actionChannel.onMessage = (data, { peerId }) => {
         if (selectedRole === 'dm') {
           if (data.type === 'PLAYER_ACTION') {
             handlePlayerAction(data.action, data.payload, peerId);
@@ -267,7 +268,7 @@ export default function Vtt() {
           if (data.type === 'ALERT_SOUND') playSound('alert');
           if (data.type === 'TORCH_SOUND') playSound('torch_on');
         }
-      });
+      };
 
     } catch (e) {
       console.error('Не удалось инициализировать Trystero:', e);
